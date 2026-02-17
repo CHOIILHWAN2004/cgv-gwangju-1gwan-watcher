@@ -1,0 +1,25 @@
+name: CGV Watcher
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # UTC 00:00 = KST 09:00
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+      - run: playwright install chromium
+
+      - run: python watch.py
+        env:
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
