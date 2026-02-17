@@ -1,131 +1,124 @@
 import os
 import re
 import smtplib
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-CGV_URL = "https://cgv.co.kr/cnm/movieBook/cinema"
-THEATER_NAME = "광주상무"
-TARGET_HALL = "1관"
+import requests
+from bs4 import BeautifulSoup
+
+# 광주상무 극장 코드
+THEATER_CODE = "0193"
 
 EMAIL_TO = os.getenv("EMAIL_TO")
 EMAIL_FROM = os.getenv("EMAIL_FROM")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
+
+TARGET_HALL = "1관"
+
 
 def send_email(subject, body):
     msg = MIMEText(body, _charset="utf-8")
     msg["Subject"] = subject
     msg["From"] = EMAIL_FROM
     msg["To"] = EMAIL_TO
+
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(EMAIL_FROM, EMAIL_PASS)
         server.sendmail(EMAIL_FROM, [EMAIL_TO], msg.as_string())
 
-def fetch_1gwan_block_text():
-    """
-    1) 예매 페이지 진입
-    2) 극장 선택 UI에서 '광주상무' 클릭
-    3) 날짜 리스트에서 '가장 마지막 날짜' 클릭
-    4) 페이지 텍스트에서 '1관'이 포함된 줄들을 수집
-    """
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1280, "height": 900})
-        page.goto(CGV_URL, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
 
-        # 팝업/배너 등으로 클릭 막힐 수 있어 스크롤 한 번
-        page.mouse.wheel(0, 600)
-        page.wait_for_timeout(500)
+def iframe_url(date_yyyymmdd):
+    return (
+        "https://www.cgv.co.kr/common/showtimes/iframeTheater.aspx"
+        f"?theatercode={THEATER_CODE}&date={date_yyyymmdd}"
+    )
 
-        # 1) 극장 선택 버튼(텍스트 기반) 클릭 시도
-        clicked = False
-        for label in ["극장", "극장선택", "극장 선택", "극장별"]:
-            try:
-                page.get_by_text(label, exact=False).first.click(timeout=1500)
-                clicked = True
-                break
-            except Exception:
-                continue
 
-        # 못 찾으면 그냥 진행(페이지 UI가 바뀐 케이스)
-        page.wait_for_timeout(800)
+def fetch_html(date_yyyymmdd):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://www.cgv.co.kr/",
+    }
+    r = requests.get(iframe_url(date_yyyymmdd), headers=headers, timeout=15)
+    r.raise_for_status()
+    return r.text
 
-        # 2) 극장명 클릭
+
+def has_schedule(html):
+    return "상영시간표가 없습니다" not in html
+
+
+def find_farthest_date(max_days=7):
+    today = datetime.now()
+    last_html = None
+    last_date = None
+
+    for i in range(max_days + 1):
+        d = today + timedelta(days=i)
+        ymd = d.strftime("%Y%m%d")
+
         try:
-            page.get_by_text(THEATER_NAME, exact=False).click(timeout=8000)
-        except PWTimeout:
-            # 목록이 안 열렸을 수도 있어 다시 한 번 '극장'쪽 클릭 후 재시도
-            try:
-                page.get_by_text("극장", exact=False).first.click(timeout=1500)
-                page.wait_for_timeout(800)
-                page.get_by_text(THEATER_NAME, exact=False).click(timeout=8000)
-            except Exception:
-                pass
-
-        page.wait_for_timeout(1500)
-
-        # 3) 날짜 탭 중 "마지막" 클릭 (요일이 들어간 요소 기준)
-        # 요일(월화수목금토일)이 포함된 버튼/탭들을 찾아 마지막 요소 클릭
-        try:
-            date_candidates = page.locator("button, a, li").filter(
-                has_text=re.compile(r"(월|화|수|목|금|토|일)")
-            )
-            n = date_candidates.count()
-            if n > 0:
-                date_candidates.nth(n - 1).click()
-                page.wait_for_timeout(1200)
+            html = fetch_html(ymd)
         except Exception:
-            pass
-
-        # 4) 최종 텍스트 수집
-        text = page.inner_text("body")
-        browser.close()
-
-    # 5) '1관' 포함된 줄 수집
-    lines = [ln.strip() for ln in text.split("\n") if TARGET_HALL in ln]
-    lines = [ln for ln in lines if ln]
-    return lines
-
-def parse_movie_titles(lines):
-    # '1관' 줄들에서 제목 후보만 뽑아 정리
-    joined = " ".join(lines)
-
-    # 제목 후보 패턴 (너무 공격적으로 안 함)
-    candidates = re.findall(r"[가-힣A-Za-z0-9][가-힣A-Za-z0-9 :\-\(\)·'’!,\.]{1,60}", joined)
-
-    blacklist = {"예매", "상영시간표", "관람", "좌석", "극장", "CGV", "로그인", "확인", "일반", "청소년", "성인"}
-    movies = []
-    for c in candidates:
-        c = c.strip(" -:,.")
-        if len(c) < 2:
             continue
-        if any(b in c for b in blacklist):
-            continue
-        movies.append(c)
 
-    # 중복 제거
-    uniq = []
-    for m in movies:
-        if m not in uniq:
-            uniq.append(m)
-    return uniq[:15]
+        if has_schedule(html):
+            last_html = html
+            last_date = ymd
 
-def def main():
+    return last_date, last_html
+
+
+def parse_1gwan(html):
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text("\n", strip=True)
+
+    lines = [ln for ln in text.split("\n") if TARGET_HALL in ln]
+
+    blacklist = {"예매", "관람", "좌석", "잔여", "상영", "시간표", "전체", "CGV", "선택"}
+
+    titles = []
+    for ln in lines:
+        for match in re.findall(r"[가-힣A-Za-z0-9][가-힣A-Za-z0-9 :\-\(\)·'’!,\.]{1,80}", ln):
+            m = match.strip(" -:,.")
+            if len(m) < 2:
+                continue
+            if any(b in m for b in blacklist):
+                continue
+            if m not in titles:
+                titles.append(m)
+
+    return titles, lines[:20]
+
+
+def main():
     today = datetime.now().strftime("%Y-%m-%d")
-    subject = f"[DEBUG] CGV 광주상무 HTML 체크 ({today})"
+    subject = f"[CGV 광주상무 1관] 자동 체크 ({today})"
 
-    farthest_ymd, html = find_farthest_date(max_days_ahead=5)
+    far_date, html = find_farthest_date()
 
     if not html:
-        body = "HTML 자체를 못 받아옴"
+        body = "상영시간표 HTML을 가져오지 못했습니다."
         send_email(subject, body)
         return
 
-    body = "=== HTML 일부 ===\n\n"
-    body += html[:2000]  # 앞 2000자만
+    movies, debug_lines = parse_1gwan(html)
+
+    body = f"기준일(가장 마지막으로 열린 날짜): {far_date}\n"
+    body += "대상: 광주상무 1관\n\n"
+
+    if movies:
+        body += "상영작:\n"
+        for m in movies:
+            body += f"- {m}\n"
+    else:
+        body += "1관 파싱 실패\n\n디버그:\n"
+        for l in debug_lines:
+            body += l + "\n"
+
     send_email(subject, body)
+
 
 if __name__ == "__main__":
     main()
