@@ -112,21 +112,19 @@ def parse_movie_titles(lines):
             uniq.append(m)
     return uniq[:15]
 
-def main():
+def def main():
     today = datetime.now().strftime("%Y-%m-%d")
-    subject = f"[CGV 광주상무 1관] 스케줄 체크 ({today})"
+    subject = f"[DEBUG] CGV 광주상무 HTML 체크 ({today})"
 
-    lines = fetch_1gwan_block_text()
-    movies = parse_movie_titles(lines)
+    farthest_ymd, html = find_farthest_date(max_days_ahead=5)
 
-    if movies:
-        body = f"{THEATER_NAME} {TARGET_HALL} (가장 마지막 날짜 기준)\n\n"
-        body += "\n".join(f"- {m}" for m in movies)
-    else:
-        body = "1관 상영작 추출 실패\n\n"
-        body += "디버그(1관 관련 텍스트 일부):\n"
-        body += "\n".join(lines[:25]) if lines else "(1관 텍스트 자체를 못 찾음)"
+    if not html:
+        body = "HTML 자체를 못 받아옴"
+        send_email(subject, body)
+        return
 
+    body = "=== HTML 일부 ===\n\n"
+    body += html[:2000]  # 앞 2000자만
     send_email(subject, body)
 
 if __name__ == "__main__":
